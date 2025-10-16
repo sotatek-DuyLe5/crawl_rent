@@ -13,8 +13,8 @@ driver = create_driver(for_facebook=True)
 wait = WebDriverWait(driver, 20)  
 
 # ==================== CẤU HÌNH ====================
-FB_EMAIL = os.environ.get("FB_EMAIL", "nhanmangaytho@gmail.com")
-FB_PASS = os.environ.get("FB_PASS", "lequangduy")
+FB_EMAIL = os.environ.get("FB_EMAIL", "xxxxx@gmail.com")
+FB_PASS = os.environ.get("FB_PASS", "xxxxx")
 WAIT_TIME = 20
 
 
