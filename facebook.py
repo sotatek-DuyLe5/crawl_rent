@@ -1,307 +1,201 @@
-import time
-import csv
 import os
-import base64
 import json
-# Selenium imports
+import time
+import pandas as pd
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from driver_factory import create_driver
 
 
-def login():
-    
-    return 
+driver = create_driver(for_facebook=True)
+wait = WebDriverWait(driver, 20)  
 
-def extract_from_aria_posinset_element(el):
-    """
-    Nhận một WebElement có attribute aria-posinset và trích xuất toàn bộ raw_text.
-    Trả về dict gồm: posinset, raw_text
-    """
+# ==================== CẤU HÌNH ====================
+FB_EMAIL = os.environ.get("FB_EMAIL", "nhanmangaytho@gmail.com")
+FB_PASS = os.environ.get("FB_PASS", "lequangduy")
+WAIT_TIME = 20
+
+
+
+def try_find_and_click(driver, selector, by=By.CSS_SELECTOR, timeout=8):
     try:
-        pos = el.get_attribute("aria-posinset")
-    except StaleElementReferenceException:
-        return None
-
-    try:
-        raw_text = el.text or ""
+        el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
+        el.click()
+        return True
     except Exception:
-        raw_text = ""
-
-    if not raw_text.strip():
-        return None
-
-    return {
-        "aria-posinset": pos,
-        "raw_text": raw_text,
-    }
+        return False
 
 
-def get_response_body(driver, request_id):
-    """Dùng CDP để lấy nội dung response của một request"""
+def login_facebook(driver, wait, email=FB_EMAIL, password=FB_PASS):
+    print("🔐 Bắt đầu đăng nhập Facebook...")
+    driver.get("https://www.facebook.com/login")
+    current_url = driver.current_url
+    if "login" not in current_url and "checkpoint" not in current_url:
+        print("✅ Đã đăng nhập sẵn vào Facebook, bỏ qua bước login.")
+        return True
+    
     try:
-        body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": request_id})
-        content = body.get("body", "")
-        if body.get("base64Encoded"):
-            content = base64.b64decode(content).decode("utf-8", errors="ignore")
-        return content
+        email_input = wait.until(EC.presence_of_element_located((By.ID, "email")))
+        email_input.clear()
+        email_input.send_keys(email)
+
+        pass_input = wait.until(EC.presence_of_element_located((By.ID, "pass")))
+        pass_input.clear()
+        pass_input.send_keys(password)
+
+        try_find_and_click(driver, "button[name='login']")
+
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[aria-label='Trang chủ']")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div[aria-label='Account']")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='navigation']")),
+                )
+            )
+            print("✅ Có vẻ đã đăng nhập thành công.")
+            return True
+        except Exception:
+            print("⚠ Không chắc đã đăng nhập — có thể bị checkpoint.")
+            return False
     except Exception as e:
-        return f"[error] {e}"
-
-def get_response_body(driver, request_id):
-    """Dùng CDP để lấy nội dung response của một request"""
-    try:
-        body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": request_id})
-        content = body.get("body", "")
-        if body.get("base64Encoded"):
-            content = base64.b64decode(content).decode("utf-8", errors="ignore")
-        return content
-    except Exception as e:
-        return f"[error] {e}"
+        print("❌ Lỗi đăng nhập:", e)
+        return False
 
 
-def page_facebook(link, driver, max_wait=10, scroll_times=3):
-    """
-    Mở link Facebook và:
-    - Cào toàn bộ element có aria-posinset (text bài viết)
-    - Ghi nhận toàn bộ request GraphQL qua CDP
-    Trả về (results, graphql_data)
-    """
-    results = []
-    graphql_data = {}
+def collect_graphql_responses(driver, scroll_times=30, sleep_between=1.5):
+    print("📡 Bắt đầu thu thập GraphQL...")
+    seen, responses = set(), []
 
-    try:
-        print(f"[FB] Mở: {link}")
-        driver.execute_cdp_cmd("Network.enable", {})  # bật network logging
-        driver.get(link)
 
-        # chờ trang load
-        WebDriverWait(driver, max_wait).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        time.sleep(3)
+    for i in range(scroll_times):
+        driver.execute_script("window.scrollBy(0, window.innerHeight);")
+        time.sleep(sleep_between)
 
-        # cuộn để tải thêm nội dung
-        for i in range(scroll_times):
-            driver.execute_script("window.scrollBy(0, window.innerHeight * 0.9);")
-            time.sleep(1.5)
 
-        # === Lấy log performance (bao gồm network events) ===
-        logs = driver.get_log("performance")
+        try:
+            logs = driver.get_log("performance")
+        except Exception:
+            logs = []
+
 
         for entry in logs:
             try:
                 msg = json.loads(entry["message"])["message"]
-                method = msg.get("method")
+                if msg.get("method") != "Network.responseReceived":
+                    continue
+
+
                 params = msg.get("params", {})
+                response = params.get("response", {})
+                url = response.get("url", "")
+                req_id = params.get("requestId")
 
-                # Request GraphQL gửi đi
-                if method == "Network.requestWillBeSent":
-                    request = params.get("request", {})
-                    req_id = params.get("requestId")
-                    url = request.get("url", "")
-                    if "graphql" in url:
-                        graphql_data[req_id] = {
-                            "url": url,
-                            "postData": request.get("postData", ""),
-                            "response_body": None,
-                        }
 
-                # Response GraphQL trả về
-                elif method == "Network.responseReceived":
-                    response = params.get("response", {})
-                    url = response.get("url", "")
-                    if "graphql" in url:
-                        req_id = params.get("requestId")
-                        body = get_response_body(driver, req_id)
-                        if req_id in graphql_data:
-                            graphql_data[req_id]["response_body"] = body
+                if "graphql" not in url.lower() or not req_id or req_id in seen:
+                    continue
+                seen.add(req_id)
+
+
+                try:
+                    body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": req_id}).get("body", "")
+                except Exception:
+                    body = ""
+
+
+                responses.append({"body": body})
             except Exception:
                 continue
 
-        # === Lấy text thô từ bài viết ===
-        elements = driver.find_elements(By.CSS_SELECTOR, "[aria-posinset]")
-        for el in elements:
-            data = extract_from_aria_posinset_element(el)
-            if data:
-                results.append(data)
 
-        print(f"[+] Thu được {len(results)} bài viết/comment.")
-        print(f"[+] Bắt được {len(graphql_data)} request GraphQL.")
-
-    except Exception as e:
-        print(f"[!] Lỗi khi xử lý link {link}: {e}")
-
-    # Chuyển graphql_data thành list cho dễ dùng
-    graphql_list = list(graphql_data.values())
-    return results, graphql_list
+        print(f"⤵ Scroll {i+1}/{scroll_times} — Tổng: {len(responses)} GraphQL responses")
 
 
-def save_fb_results_to_csv(results, filename="facebook_rawtext.csv"):
-    """Lưu kết quả văn bản (aria-posinset) vào CSV"""
-    headers = ["aria-posinset", "raw_text"]
-    count = 0
-    with open(filename, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
-
-        for r in results:
-            if isinstance(r, dict):  # chỉ ghi nếu r là dict
-                writer.writerow({h: r.get(h, "") for h in headers})
-                count += 1
-            elif isinstance(r, list):  # nếu r là list, thì ghi từng phần tử trong đó
-                for item in r:
-                    if isinstance(item, dict):
-                        writer.writerow({h: item.get(h, "") for h in headers})
-                        count += 1
-
-    print(f"[+] Lưu {count} hàng vào {filename}")
+    return responses
 
 
-def save_graphql_to_json(graphql_data, filename="facebook_graphql.json"):
-    """Lưu các request GraphQL vào JSON"""
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(graphql_data, f, ensure_ascii=False, indent=2)
-    print(f"[+] Lưu {len(graphql_data)} request GraphQL vào {filename}")
+def parse_multiple_jsons(s):
+    decoder = json.JSONDecoder()
+    idx, results = 0, []
+    while idx < len(s):
+        s = s.lstrip()
+        try:
+            obj, end = decoder.raw_decode(s)
+            results.append(obj)
+            s = s[end:]
+        except json.JSONDecodeError:
+            break
+    return results
 
 
+def parse_graphql_responses(graphql_data):
+    rows = []
+    for item in graphql_data:
+        body = item.get("body")
+        if not body:
+            continue
 
 
+        for js in parse_multiple_jsons(body):
+            try:
+                node = js["data"]["node"]
+
+                actors = node.get("actors", [])
+                if actors:
+                    name = actors[0].get("name", "")
+                    url = actors[0].get("url", "")
+                    poster = f"{name} - {url}" if name or url else None
+                else:
+                    poster = None
+
+                msg = (
+                    node.get("comet_sections", {})
+                    .get("content", {})
+                    .get("story", {})
+                    .get("message", {})
+                )
+                msg_text = msg.get("text") if isinstance(msg, dict) else None
+                permalink = node.get("permalink_url", None)
 
 
-
-
-
-
-
-
-
-
-
-
-# def extract_from_aria_posinset_element(el):
-#     """
-#     Nhận một WebElement có attribute aria-posinset và trích xuất toàn bộ raw_text.
-#     Trả về dict gồm: posinset, raw_text
-#     """
-#     try:
-#         pos = el.get_attribute("aria-posinset")
-#     except StaleElementReferenceException:
-#         return None
-
-#     try:
-#         raw_text = el.text or ""
-#     except Exception:
-#         raw_text = ""
-
-#     if not raw_text.strip():
-#         return None
-
-#     return {
-#         "aria-posinset": pos,
-#         "raw_text": raw_text,
-#     }
-
-
-# def page_facebook(link, driver, max_wait=10, scroll_times=3):
-#     """
-#     Mở link Facebook và thu các element có attribute aria-posinset.
-#     """
-#     results = []
-
-#     try:
-#         print(f"[FB] Mở: {link}")
-#         driver.get(link)
-
-#         # Chờ body xuất hiện
-#         WebDriverWait(driver, max_wait).until(
-#             EC.presence_of_element_located((By.TAG_NAME, "body"))
-#         )
-#         time.sleep(2)
-
-#         # Cuộn để tải nội dung thêm
-#         for i in range(scroll_times):
-#             driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
-#             time.sleep(1.2)
-
-#         # Lấy phần tử có aria-posinset
-#         elements = driver.find_elements(By.CSS_SELECTOR, "[aria-posinset]")
-#         for el in elements:
-#             data = extract_from_aria_posinset_element(el)
-#             if data:
-#                 results.append(data)
-
-#         print(f"[+] Thu được {len(results)} phần tử từ {link}")
-
-#     except Exception as e:
-#         print(f"[!] Lỗi khi xử lý link {link}: {e}")
-
-#     return results, []
-
-        ## tìm tất cả phần tử có attribute aria-posinset
-    #     try:
-    #         nodes = driver.find_elements(By.CSS_SELECTOR, "[aria-posinset]")
-    #     except Exception:
-    #         nodes = []
-
-    #     print(f"[FB] Tìm thấy {len(nodes)} phần tử có aria-posinset")
-
-    #     # duyệt từng node, extract
-    #     for n in nodes:
-    #         info = extract_from_aria_posinset_element(n)
-    #         if info:
-    #             results.append(info)
-
-    #     # nếu muốn, ta có thể dedupe theo aria-posinset
-    #     seen = set()
-    #     uniq_results = []
-    #     for r in results:
-    #         key = (r.get("aria-posinset"), r.get("raw_text")[:80])
-
-    #         if key in seen:
-    #             continue
-    #         seen.add(key)
-    #         uniq_results.append(r)
-
-    #     return uniq_results
-
-    # finally:
-    #     if created_driver:
-    #         # giữ driver mở 2s để bạn nhìn kết quả nếu không headless, rồi đóng
-    #         time.sleep(2)
-    #         try:
-    #             driver.quit()
-    #         except Exception:
-    #             pass
-
-
-    
+                rows.append({
+                    "poster": poster,
+                    "message": msg_text,
+                    "permalink": permalink
+                })
+            except Exception:
+                continue
+    return rows
 
 
 
+def save_fb_results_to_csv(rows, filename="facebook_posts.csv"):
+    if not rows:
+        print("⚠ Không có dữ liệu để lưu.")
+        return
+    df = pd.DataFrame(rows)
+    df.to_csv(filename, index=False, encoding="utf-8-sig")
+    print(f"💾 Đã lưu {len(rows)} bài viết vào {filename}")
 
 
 
+def page_facebook(group_url, driver, scroll_times=20):
+    wait = WebDriverWait(driver, 20)
+    if not login_facebook(driver,wait):
+        print("🚫 Không thể đăng nhập — dừng crawl.")
+        return []
 
-# def save_fb_results_to_csv(results, filename="facebook_rawtext.csv"):
-#     headers = ["aria-posinset", "raw_text"]
-#     count = 0
-#     with open(filename, "w", encoding="utf-8-sig", newline="") as f:
-#         writer = csv.DictWriter(f, fieldnames=headers)
-#         writer.writeheader()
 
-#         for r in results:
-#             if isinstance(r, dict):  # chỉ ghi nếu r là dict
-#                 writer.writerow({h: r.get(h, "") for h in headers})
-#                 count += 1
-#             elif isinstance(r, list):  # nếu r là list, thì ghi từng phần tử trong đó
-#                 for item in r:
-#                     if isinstance(item, dict):
-#                         writer.writerow({h: item.get(h, "") for h in headers})
-#                         count += 1
+    driver.get(group_url)
+    time.sleep(5)
 
-#     print(f"[+] Lưu {count} hàng vào {filename}")
+
+    graphql_data = collect_graphql_responses(driver, scroll_times)
+    rows = parse_graphql_responses(graphql_data)
+
+
+    print(f"✅ Trích xuất được {len(rows)} bài viết hợp lệ.")
+    return rows
+
