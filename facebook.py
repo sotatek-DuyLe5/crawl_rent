@@ -12,11 +12,9 @@ from driver_factory import create_driver
 driver = create_driver(for_facebook=True)
 wait = WebDriverWait(driver, 20)  
 
-# ==================== CẤU HÌNH ====================
 FB_EMAIL = os.environ.get("FB_EMAIL", "xxxxx@gmail.com")
 FB_PASS = os.environ.get("FB_PASS", "xxxxx")
 WAIT_TIME = 20
-
 
 
 def try_find_and_click(driver, selector, by=By.CSS_SELECTOR, timeout=8):
